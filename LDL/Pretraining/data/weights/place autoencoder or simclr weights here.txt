@@ -1,0 +1,1 @@
+place autoencoder or simclr weights here
