@@ -11,7 +11,7 @@ from densenet  import *
 args = conf()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-#Selecting the autoencoder
+
 def model_select(args):
     if args.usenet == "bn_alexnet":
         model = bn_alexnet(pretrained=False,num_classes=args.numof_classes).to(device)
@@ -52,14 +52,14 @@ class Encoder(nn.Module):
     def __init__(self, args):
         super(Encoder, self).__init__()
         model = model_select(args)
-        self.encoder = nn.Sequential(*list(model.children())[:-2])  # Remove the final layers
+        self.encoder = nn.Sequential(*list(model.children())[:-1])
 
     def forward(self, x):
-        x = self.encoder(x)
-        return x
-    
+        return self.encoder(x)
+
+
 class Decoder(nn.Module):
-    def __init__(self, encoded_channels, encoded_height, encoded_width):
+    def __init__(self, encoded_channels):
         super(Decoder, self).__init__()
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(encoded_channels, 512, kernel_size=2, stride=2),
@@ -70,27 +70,31 @@ class Decoder(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 3, kernel_size=2, stride=2),
+            nn.ConvTranspose2d(64, 3, kernel_size=1),  
             nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, x, original_size):
         x = self.decoder(x)
+        x = nn.functional.interpolate(x, size=original_size, mode='bilinear', align_corners=False)  # Resize
         return x
 
+
 class Network(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, input_size=(args.crop_size, args.crop_size)):
         super(Network, self).__init__()
         self.encoder = Encoder(args)
-        
-        # Dummy input to determine the size of the encoder output
-        dummy_input = torch.randn(1, 3, 256, 256).to(device)
-        encoded_output = self.encoder(dummy_input)
+
+        # Dummy input to determine encoded size
+        dummy_input = torch.randn(1, 3, *input_size).to(device)
+        with torch.no_grad():
+            encoded_output = self.encoder(dummy_input)
         _, encoded_channels, encoded_height, encoded_width = encoded_output.size()
-        
-        self.decoder = Decoder(encoded_channels, encoded_height, encoded_width)
+
+        self.decoder = Decoder(encoded_channels)
 
     def forward(self, x):
+        original_size = x.size()[2:]  # Save original height and width
         x = self.encoder(x)
-        x = self.decoder(x)
+        x = self.decoder(x, original_size)  # Pass original size to decoder
         return x

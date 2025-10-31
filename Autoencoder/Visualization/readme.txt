@@ -1,0 +1,1 @@
+Network settings and path arguments are the most important to adjust in the args.py folder before running main.py. Make sure to change the weight_name to match the checkpoint's.

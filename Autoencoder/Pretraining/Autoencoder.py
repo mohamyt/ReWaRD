@@ -71,7 +71,6 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(64, 3, kernel_size=1),  
-            nn.Sigmoid()
         )
 
     def forward(self, x, original_size):

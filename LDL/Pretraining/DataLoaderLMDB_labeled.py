@@ -2,63 +2,73 @@ import lmdb
 import cv2
 from PIL import Image
 import numpy as np
+import random
+import struct
 from torch.utils.data import Dataset
-import h5py
 
-class Dataset_labeled(Dataset):
-    def __init__(self, lmdb_file, path2labels, transform=None, train_portion=1, shuffle=False, val=False, seed=1):
-        self.transform = transform
+class Dataset_(Dataset):
+    """LMDB dataset that returns images and their cluster label.
+
+    Value format in LMDB: 4-byte little-endian unsigned int label followed by image bytes (jpg/png).
+    """
+    def __init__(self, lmdb_file, transform=None, train_portion=1.0, shuffle=False, val=False, seed=1):
         self.lmdb_file = lmdb_file
-        self.path2labels = path2labels
+        self.transform = transform
+        self.train_portion = train_portion
+        self.shuffle = shuffle
+        self.val = val
+        self.seed = seed
 
-        # Initialize keys from LMDB
-        self.keys = []
-        with lmdb.open(self.lmdb_file, readonly=True, lock=False) as env:
+        with lmdb.open(self.lmdb_file, readonly=True, lock=False, readahead=False) as env:
             with env.begin() as txn:
-                cursor = txn.cursor()
-                for key, _ in cursor:
-                    key_str = key.decode('utf-8')
-                    if key_str.startswith('image_'):  
-                        self.keys.append(key)
-                    
-        self.indices = np.arange(len(self.keys))  # Use numpy array for shuffling
-        if shuffle:
-            np.random.seed(seed)
-            self.indices = np.random.permutation(self.indices)
-        if val and train_portion < 1:
-            self.indices = self.indices[int(len(self.indices) * train_portion):]
-        else:
-            self.indices = self.indices[:int(len(self.indices) * train_portion)]
+                self.keys = [key for key, _ in txn.cursor()]
 
-        # The HDF5 file is not opened here; it will be opened in __getitem__
+        if self.shuffle:
+            random.seed(self.seed)
+            random.shuffle(self.keys)
+
+        split_idx = int(len(self.keys) * self.train_portion)
+        self.keys = self.keys[split_idx:] if self.val and self.train_portion < 1 else self.keys[:split_idx]
+
         self.env = None
 
     def _init_env(self):
         if self.env is None:
-            self.env = lmdb.open(self.lmdb_file, readonly=True, lock=False)
-
-    def _load_pseudo_labels_h5(self):
-        """Open the HDF5 file in each worker."""
-        return h5py.File(self.path2labels, 'r')['pseudo_labels']
+            self.env = lmdb.open(
+                self.lmdb_file,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+            )
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.keys)
 
     def __getitem__(self, idx):
         self._init_env()
-        image_key = self.keys[self.indices[idx]]
+        key = self.keys[idx]
         with self.env.begin() as txn:
-            # Retrieve the image from LMDB
-            image_value = txn.get(image_key)
-            image = np.frombuffer(image_value, dtype=np.uint8)
-            image = cv2.imdecode(image, cv2.IMREAD_COLOR)
-            image = Image.fromarray(image)
+            value = txn.get(key)
+            if value is None:
+                raise KeyError(f"Key {key} not found in LMDB {self.lmdb_file}")
 
-            # Open the HDF5 file for pseudo-labels in __getitem__ to avoid multiprocessing issues
-            with h5py.File(self.path2labels, 'r') as f:
-                pseudo_label = f['pseudo_labels'][self.indices[idx]]
+            # first 4 bytes: unsigned int label
+            if len(value) < 4:
+                raise ValueError(f"Value for key {key} is too small to contain a label")
+            label = struct.unpack('<I', value[:4])[0]
+            image_bytes = value[4:]
+            image = np.frombuffer(image_bytes, dtype=np.uint8)
+            image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"Corrupt image for key {key}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(image)
 
         if self.transform:
             image = self.transform(image)
+        return image, int(label)
 
-        return image, pseudo_label
+
+# Backwards-compatible alias expected by main.py
+Dataset_labeled = Dataset_

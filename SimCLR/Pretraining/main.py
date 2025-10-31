@@ -12,12 +12,79 @@ import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from PIL import Image
+import sys
+import importlib
 
-from args import conf
 from transforms import RandomGaussianBlur
 from Model import *
+import matplotlib.pyplot as plt
+
+import torch
+import matplotlib.pyplot as plt
+import random
+
+def sanity_check_dataloader(train_loader, num_samples=8, device="cpu", seed=1):
+    dataset = train_loader.dataset
+
+    # Select random indices based on seed
+    random.seed(seed)
+    indices = random.sample(range(len(dataset)), num_samples)
+
+    imgs1, imgs2 = [], []
+    for idx in indices:
+        img_pair = dataset[idx]
+        # Unpack correctly depending on return type
+        if isinstance(img_pair, (tuple, list)) and len(img_pair) == 2:
+            img1, img2 = img_pair
+        else:
+            img1, img2 = img_pair, img_pair  # fallback: same image twice
+        imgs1.append(img1)
+        imgs2.append(img2)
+
+    # Stack to tensors
+    imgs1 = torch.stack(imgs1).to(device)
+    imgs2 = torch.stack(imgs2).to(device)
+
+    # Denormalize for visualization
+    def denormalize(tensor, mean, std):
+        mean = torch.tensor(mean).view(3, 1, 1).to(tensor.device)
+        std = torch.tensor(std).view(3, 1, 1).to(tensor.device)
+        return tensor * std + mean
+
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    imgs1 = denormalize(imgs1, mean, std).clamp(0, 1)
+    imgs2 = denormalize(imgs2, mean, std).clamp(0, 1)
+
+    # Plot the pairs
+    fig, axes = plt.subplots(num_samples, 2, figsize=(6, 3 * num_samples))
+    for i in range(num_samples):
+        ax1, ax2 = axes[i]
+        ax1.imshow(imgs1[i].permute(1, 2, 0).cpu().numpy())
+        ax2.imshow(imgs2[i].permute(1, 2, 0).cpu().numpy())
+        ax1.axis("off")
+        ax2.axis("off")
+        ax1.set_title(f"View 1 - sample {i}")
+        ax2.set_title(f"View 2 - sample {i}")
+
+    plt.tight_layout()
+    plt.show()
+    plt.savefig("sample_images.png")
 
 if __name__ == "__main__":
+    # Default args module
+    args_module_name = "args"
+
+    if len(sys.argv) > 1:
+        args_path = sys.argv[1]
+        args_module_name = os.path.splitext(os.path.basename(args_path))[0]
+
+    print(f"Using argument file: {args_module_name}.py")
+
+    args_module = importlib.import_module(args_module_name)
+    args = args_module.conf()
+
     # Option
     args = conf()
     print(args)
@@ -25,7 +92,7 @@ if __name__ == "__main__":
     if args.lmdb:
         from DataLoaderLMDB import Dataset_
     else:
-        from torchvision.datasets import ImageFolder
+        from DataLoader import Dataset_
 
     # Processing time
     starttime = time.time()
@@ -43,66 +110,52 @@ if __name__ == "__main__":
 
     # Training settings
 
-    if args.dataset == 'ImageNet1k':
-        train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(size=args.r_crop_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-            transforms.RandomGrayscale(p=args.p_grayscale),
-            RandomGaussianBlur(probability=args.p_blur, radius=torch.rand(1).item()*(args.max_blur_r-args.min_blur_r)+args.min_blur_r),  # Random Gaussian blur with radius between 2 and 4
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-    else:
-            train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(size=args.r_crop_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-            transforms.RandomGrayscale(p=args.p_grayscale),
-            RandomGaussianBlur(probability=args.p_blur, radius=torch.rand(1).item()*(args.max_blur_r-args.min_blur_r)+args.min_blur_r),  # Random Gaussian blur with radius between 2 and 4
-            transforms.ToTensor()
-        ])
-
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(size=args.r_crop_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+        transforms.RandomGrayscale(p=args.p_grayscale),
+        RandomGaussianBlur(
+            probability=args.p_blur,
+            radius=torch.rand(1).item() * (args.max_blur_r - args.min_blur_r) + args.min_blur_r
+        ),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225])
+    ])
     train_portion = 1
 
     if args.val:
-        if args.dataset == 'ImageNet1k':
-            val_transform = transforms.Compose([
+        val_transform = transforms.Compose([
                 transforms.RandomResizedCrop(size=args.r_crop_size),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-        else:
-            val_transform = transforms.Compose([
-                transforms.RandomResizedCrop(size=args.r_crop_size),
-                transforms.ToTensor()
-            ])
         if args.path2valdb == args.path2traindb:
             train_portion = 0.7
         if args.lmdb:
             val_dataset = Dataset_(args.path2valdb, transform=val_transform, train_portion=train_portion, shuffle=True, val=True, seed=args.seed)
         else:
-            val_dataset = ImageFolder(args.path2valdb, transform=val_transform)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+            val_dataset = Dataset_(args.path2valdb, transform=val_transform, train_portion=train_portion, shuffle=True, val=True, seed=args.seed)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, persistent_workers=True)
 
     if args.lmdb:
         train_dataset = Dataset_(args.path2traindb, transform=train_transform, train_portion=train_portion, shuffle=True, val=False, seed=args.seed)
     else:
-        train_dataset = ImageFolder(args.path2traindb, transform=train_transform)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+        train_dataset = Dataset_(args.path2traindb, transform=val_transform, train_portion=train_portion, shuffle=True, val=False, seed=args.seed)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, persistent_workers=True)
 
     # NT-Xent loss function
     def nt_xent_loss(projections, temperature):
         batch_size = projections.shape[0] // 2
-        labels = torch.cat([torch.arange(batch_size) for i in range(2)], dim=0)
+        labels = torch.cat([torch.arange(batch_size) for _ in range(2)], dim=0)
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float().to(projections.device)
 
-        # Normalize projections to avoid exploding logits
-        projections = nn.functional.normalize(projections, p=2, dim=1)
-
+        # Normalize projections
+        projections = F.normalize(projections, p=2, dim=1)
         similarity_matrix = torch.matmul(projections, projections.T)
 
-        # Masking to remove similarity of identical samples
+        # Mask to remove self-similarity
         mask = torch.eye(labels.shape[0], dtype=torch.bool).to(projections.device)
         labels = labels[~mask].view(labels.shape[0], -1)
         similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)
@@ -112,10 +165,9 @@ if __name__ == "__main__":
 
         logits = torch.cat([positives, negatives], dim=1)
         logits /= temperature
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(projections.device)
+        targets = torch.zeros(logits.shape[0], dtype=torch.long).to(projections.device)
 
-        loss = F.cross_entropy(logits, labels)
-        return loss
+        return F.cross_entropy(logits, targets)
 
     # Model
     model = Network(args)
@@ -151,11 +203,12 @@ if __name__ == "__main__":
         current_lr = args.lr
 
     # Using AdamW optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr if not args.use_last_lr else current_lr)
-    scheduler = MultiStepLR(optimizer, milestones=args.scheduler_milestones, gamma=args.scheduler_gamma)
-    if args.resume_scheduler and args.resume:
-        for i in range(args.start_epoch):
-            scheduler.step()
+    optimizer = optim.SGD(model.parameters(), lr=args.lr if not args.use_last_lr else current_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    if args.use_scheduler:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.0001)
+        if args.resume_scheduler and args.resume:
+            for i in range(args.start_epoch):
+                scheduler.step()
 
     num_epochs = args.epochs
     model.to(device)
@@ -166,16 +219,19 @@ if __name__ == "__main__":
         torch.save(state, filename)
         print(f"Checkpoint saved to {filename}")
 
+    sanity_check_dataloader(train_loader, device=device, seed=int(starttime))
+    #Train loop
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         lr.append(optimizer.param_groups[0]["lr"])
         print(f"Learning rate: {lr[-1]}")
         
-        for imgs in tqdm(iterable=train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            if not args.lmdb:
-                imgs = imgs[0]
-            imgs = torch.cat([imgs, imgs], dim=0)
+        for imgs1, imgs2 in tqdm(iterable=train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            # if not args.lmdb:
+            #     imgs1, imgs2 = imgs1[0], imgs2[0]
+            imgs = torch.cat([imgs1, imgs2], dim=0)
+            #print(f"imgs shape: {imgs.shape}")
             imgs = imgs.to(device)
 
             # Check for NaNs in input data
@@ -211,8 +267,8 @@ if __name__ == "__main__":
             model.eval()
             running_loss = 0.0
             for imgs in tqdm(iterable=val_loader, desc=f"Validation of epoch {epoch+1}/{num_epochs}"):
-                if not args.lmdb:
-                    imgs = imgs[0]
+                # if not args.lmdb:
+                #     imgs = imgs[0]
                 imgs = torch.cat([imgs, imgs], dim=0)
                 imgs = imgs.to(device)
 
@@ -233,8 +289,8 @@ if __name__ == "__main__":
 
             epoch_loss = running_loss / len(val_loader.dataset)
             val_losses.append(epoch_loss)
-
-        scheduler.step()
+        if args.use_scheduler:
+            scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
 
         if (epoch + 1) % args.save_interval == 0:
@@ -251,6 +307,7 @@ if __name__ == "__main__":
                 'lr': lr,
                 'current_lr': current_lr
             }, checkpoint_filename)
+            print(f"Directory '{checkpoint_filename}' created successfully.")
             print(f"Model checkpoint saved at epoch {epoch+1}")
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {train_losses[-1]}")
 
